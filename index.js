@@ -1,0 +1,91 @@
+process.on("uncaughtException", console.error);
+process.on("unhandledRejection", console.error);
+require("dotenv").config();
+
+const { Client, GatewayIntentBits } = require("discord.js");
+const {
+  joinVoiceChannel,
+  createAudioPlayer,
+  createAudioResource,
+} = require("@discordjs/voice");
+
+const ytdlp = require("yt-dlp-exec");
+const ffmpeg = require("ffmpeg-static");
+const { spawn } = require("child_process");
+
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildVoiceStates,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent
+  ]
+});
+
+const player = createAudioPlayer();
+
+client.on("messageCreate", async message => {
+  if (message.author.bot) return;
+
+  if (message.content.startsWith("!play")) {
+
+    const url = message.content.split(" ")[1];
+    if (!url) return message.reply("Provide YouTube link");
+
+    const voiceChannel = message.member.voice.channel;
+    if (!voiceChannel)
+      return message.reply("Join voice channel first!");
+
+    const connection = joinVoiceChannel({
+      channelId: voiceChannel.id,
+      guildId: message.guild.id,
+      adapterCreator: message.guild.voiceAdapterCreator
+    });
+
+ const { StreamType } = require("@discordjs/voice");
+
+const ytdlpProcess = spawn("yt-dlp", [
+  "-f", "bestaudio",
+  "--no-playlist",
+  "-o", "-",
+  url
+]);
+const ffmpegProcess = spawn(ffmpeg, [
+  "-i", "pipe:0",
+  "-f", "s16le",
+  "-ar", "48000",
+  "-ac", "2",
+  "pipe:1"
+]);
+
+ytdlpProcess.stdout.pipe(ffmpegProcess.stdin);
+
+ytdlpProcess.stderr.on("data", data => {
+  console.error("yt-dlp error:", data.toString());
+});
+
+// only log real errors if needed
+ffmpegProcess.on("error", console.error);
+});
+
+const resource = createAudioResource(ffmpegProcess.stdout, {
+  inputType: StreamType.Raw
+});
+
+    player.play(resource);
+    connection.subscribe(player);
+
+    message.reply("Playing 🎵");
+  }
+
+  if (message.content === "!stop") {
+    player.stop();
+    message.reply("Stopped");
+  }
+});
+
+client.once("clientReady", () => {
+  console.log(`Logged in as ${client.user.tag}`);
+});
+
+client.login(process.env.DISCORD_TOKEN);
