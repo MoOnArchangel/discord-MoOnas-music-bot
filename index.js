@@ -1,11 +1,10 @@
 require("dotenv").config();
 
-const { Client, GatewayIntentBits, Partials } = require("discord.js");
+const { Client, GatewayIntentBits } = require("discord.js");
 const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus } = require("@discordjs/voice");
 const ytdlp = require("yt-dlp-exec");
 const ffmpeg = require("ffmpeg-static");
 const { spawn } = require("child_process");
-const { pipeline } = require("stream/promises");
 
 const client = new Client({
   intents: [
@@ -16,100 +15,89 @@ const client = new Client({
   ]
 });
 
-// Server queues: { guildId: { player, connection, songs: [] } }
-const queues = new Map();
+// Map to hold queues per guild
+const queueMap = new Map();
 
-client.once("ready", () => console.log(`Logged in as ${client.user.tag}`));
+client.once("ready", () => {
+  console.log(`Logged in as ${client.user.tag}`);
+});
 
 client.on("messageCreate", async message => {
   if (message.author.bot) return;
 
+  const guildId = message.guild.id;
+  if (!queueMap.has(guildId)) {
+    queueMap.set(guildId, { songs: [], player: createAudioPlayer(), connection: null, playing: false });
+  }
+
+  const serverQueue = queueMap.get(guildId);
+
   const args = message.content.split(" ");
-  const command = args[0].toLowerCase();
+  const command = args.shift().toLowerCase();
 
   if (command === "!play") {
-    const url = args[1];
+    const url = args[0];
     if (!url) return message.reply("Provide a YouTube link!");
 
     const voiceChannel = message.member.voice.channel;
     if (!voiceChannel) return message.reply("Join a voice channel first!");
 
-    let serverQueue = queues.get(message.guild.id);
-
-    if (!serverQueue) {
-      // Create new queue for this server
+    if (!serverQueue.connection) {
       const connection = joinVoiceChannel({
         channelId: voiceChannel.id,
-        guildId: message.guild.id,
+        guildId: guildId,
         adapterCreator: message.guild.voiceAdapterCreator
       });
+      serverQueue.connection = connection;
 
-      const player = createAudioPlayer();
+      // Subscribe the player to the connection
+      connection.subscribe(serverQueue.player);
 
-      serverQueue = {
-        player,
-        connection,
-        songs: []
-      };
-
-      queues.set(message.guild.id, serverQueue);
-
-      // Play next song automatically when one finishes
-      player.on(AudioPlayerStatus.Idle, () => {
-        serverQueue.songs.shift(); // remove finished song
+      // When the player finishes, play next
+      serverQueue.player.on(AudioPlayerStatus.Idle, () => {
+        serverQueue.songs.shift();
         if (serverQueue.songs.length > 0) {
-          playSong(message.guild.id, serverQueue.songs[0]);
+          playSong(guildId, serverQueue.songs[0]);
+        } else {
+          serverQueue.playing = false;
         }
       });
-
-      player.on("error", err => {
-        console.error("Player error:", err);
-        serverQueue.songs.shift(); // skip faulty song
-        if (serverQueue.songs.length > 0) playSong(message.guild.id, serverQueue.songs[0]);
-      });
-
-      connection.subscribe(player);
     }
 
-    // Add song to queue
     serverQueue.songs.push(url);
-    message.reply(`Added to queue 🎵`);
+    message.reply(`Queued: ${url}`);
 
-    // If nothing is playing, start the first song
-    if (serverQueue.songs.length === 1) {
-      playSong(message.guild.id, url);
+    if (!serverQueue.playing) {
+      serverQueue.playing = true;
+      playSong(guildId, serverQueue.songs[0]);
     }
   }
 
   if (command === "!skip") {
-    const serverQueue = queues.get(message.guild.id);
-    if (!serverQueue || serverQueue.songs.length === 0) return message.reply("Nothing to skip!");
-    
-    serverQueue.player.stop(); // triggers AudioPlayerStatus.Idle → next song plays
-    message.reply("Skipped ⏭️");
+    if (!serverQueue.playing) return message.reply("Nothing is playing!");
+    serverQueue.player.stop();
+    message.reply("Skipped!");
   }
 
   if (command === "!stop") {
-    const serverQueue = queues.get(message.guild.id);
-    if (!serverQueue) return message.reply("Nothing is playing!");
-
-    serverQueue.songs = [];
-    serverQueue.player.stop();
-    message.reply("Stopped ⏹️");
+    if (serverQueue.connection) {
+      serverQueue.player.stop();
+      serverQueue.connection.destroy();
+      serverQueue.connection = null;
+      serverQueue.songs = [];
+      serverQueue.playing = false;
+      message.reply("Stopped and cleared the queue!");
+    }
   }
 });
 
-// Helper to play a song URL
 async function playSong(guildId, url) {
-  const serverQueue = queues.get(guildId);
-  if (!serverQueue) return;
-
+  const serverQueue = queueMap.get(guildId);
   try {
     const stream = ytdlp.exec(url, {
       output: "-",
       format: "bestaudio",
-      quiet: true,
-      noPlaylist: true
+      quiet: true
     });
 
     const ffmpegProcess = spawn(ffmpeg, [
@@ -120,17 +108,12 @@ async function playSong(guildId, url) {
       "pipe:1"
     ]);
 
-    await pipeline(stream.stdout, ffmpegProcess.stdin);
+    stream.stdout.pipe(ffmpegProcess.stdin);
 
     const resource = createAudioResource(ffmpegProcess.stdout);
     serverQueue.player.play(resource);
-
-  } catch (err) {
-    console.error("Audio error:", err);
-    serverQueue.songs.shift(); // remove failed song
-    if (serverQueue.songs.length > 0) {
-      playSong(guildId, serverQueue.songs[0]);
-    }
+  } catch (error) {
+    console.error("Error playing song:", error);
   }
 }
 
