@@ -1,7 +1,12 @@
 process.on("uncaughtException", console.error);
 process.on("unhandledRejection", console.error);
 require("dotenv").config();
+const express = require("express");
+const app = express();
+const PORT = 3000;
 
+app.get("/", (req, res) => res.send("Bot is alive!"));
+app.listen(PORT, () => console.log(`Web server running on port ${PORT}`));
 const { Client, GatewayIntentBits } = require("discord.js");
 const {
   joinVoiceChannel,
