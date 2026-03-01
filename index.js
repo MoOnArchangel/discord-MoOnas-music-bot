@@ -1,9 +1,15 @@
 require("dotenv").config();
 
 const { Client, GatewayIntentBits } = require("discord.js");
-const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus } = require("@discordjs/voice");
-const ytdlp = require("yt-dlp-exec");
-const ffmpeg = require("ffmpeg-static");
+const {
+  joinVoiceChannel,
+  createAudioPlayer,
+  createAudioResource,
+  AudioPlayerStatus
+} = require("@discordjs/voice");
+
+const ytdl = require("ytdl-core");
+const ffmpegPath = require("@ffmpeg-installer/ffmpeg").path;
 const { spawn } = require("child_process");
 
 const client = new Client({
@@ -15,22 +21,48 @@ const client = new Client({
   ]
 });
 
-// Map to hold queues per guild
-const queueMap = new Map();
+const player = createAudioPlayer();
+const queue = [];
+let isPlaying = false;
+let connection = null;
 
-client.once("ready", () => {
-  console.log(`Logged in as ${client.user.tag}`);
+async function playNext() {
+  if (queue.length === 0) {
+    isPlaying = false;
+    return;
+  }
+
+  isPlaying = true;
+  const url = queue.shift();
+
+  try {
+    const stream = ytdl(url, { filter: "audioonly", quality: "highestaudio" });
+
+    const ffmpegProcess = spawn(ffmpegPath, [
+      "-i", "pipe:0",
+      "-f", "s16le",
+      "-ar", "48000",
+      "-ac", "2",
+      "pipe:1"
+    ]);
+
+    stream.pipe(ffmpegProcess.stdin);
+
+    const resource = createAudioResource(ffmpegProcess.stdout);
+    player.play(resource);
+    connection.subscribe(player);
+  } catch (err) {
+    console.error("Error playing stream:", err);
+    playNext(); // skip to next if failed
+  }
+}
+
+player.on(AudioPlayerStatus.Idle, () => {
+  playNext();
 });
 
 client.on("messageCreate", async message => {
   if (message.author.bot) return;
-
-  const guildId = message.guild.id;
-  if (!queueMap.has(guildId)) {
-    queueMap.set(guildId, { songs: [], player: createAudioPlayer(), connection: null, playing: false });
-  }
-
-  const serverQueue = queueMap.get(guildId);
 
   const args = message.content.split(" ");
   const command = args.shift().toLowerCase();
@@ -42,79 +74,39 @@ client.on("messageCreate", async message => {
     const voiceChannel = message.member.voice.channel;
     if (!voiceChannel) return message.reply("Join a voice channel first!");
 
-    if (!serverQueue.connection) {
-      const connection = joinVoiceChannel({
+    if (!connection) {
+      connection = joinVoiceChannel({
         channelId: voiceChannel.id,
-        guildId: guildId,
+        guildId: message.guild.id,
         adapterCreator: message.guild.voiceAdapterCreator
       });
-      serverQueue.connection = connection;
-
-      // Subscribe the player to the connection
-      connection.subscribe(serverQueue.player);
-
-      // When the player finishes, play next
-      serverQueue.player.on(AudioPlayerStatus.Idle, () => {
-        serverQueue.songs.shift();
-        if (serverQueue.songs.length > 0) {
-          playSong(guildId, serverQueue.songs[0]);
-        } else {
-          serverQueue.playing = false;
-        }
-      });
     }
 
-    serverQueue.songs.push(url);
-    message.reply(`Queued: ${url}`);
+    queue.push(url);
+    message.reply(`Added to queue! Position: ${queue.length}`);
 
-    if (!serverQueue.playing) {
-      serverQueue.playing = true;
-      playSong(guildId, serverQueue.songs[0]);
-    }
+    if (!isPlaying) playNext();
   }
 
   if (command === "!skip") {
-    if (!serverQueue.playing) return message.reply("Nothing is playing!");
-    serverQueue.player.stop();
-    message.reply("Skipped!");
+    player.stop();
+    message.reply("Skipped current track!");
   }
 
   if (command === "!stop") {
-    if (serverQueue.connection) {
-      serverQueue.player.stop();
-      serverQueue.connection.destroy();
-      serverQueue.connection = null;
-      serverQueue.songs = [];
-      serverQueue.playing = false;
-      message.reply("Stopped and cleared the queue!");
-    }
+    queue.length = 0;
+    player.stop();
+    message.reply("Stopped and cleared queue!");
+  }
+
+  if (command === "!queue") {
+    if (queue.length === 0) return message.reply("Queue is empty!");
+    message.reply("Queue:\n" + queue.map((u, i) => `${i + 1}. ${u}`).join("\n"));
   }
 });
 
-async function playSong(guildId, url) {
-  const serverQueue = queueMap.get(guildId);
-  try {
-    const stream = ytdlp.exec(url, {
-      output: "-",
-      format: "bestaudio",
-      quiet: true
-    });
-
-    const ffmpegProcess = spawn(ffmpeg, [
-      "-i", "pipe:0",
-      "-f", "s16le",
-      "-ar", "48000",
-      "-ac", "2",
-      "pipe:1"
-    ]);
-
-    stream.stdout.pipe(ffmpegProcess.stdin);
-
-    const resource = createAudioResource(ffmpegProcess.stdout);
-    serverQueue.player.play(resource);
-  } catch (error) {
-    console.error("Error playing song:", error);
-  }
-}
+client.once("ready", () => {
+  console.log(`Logged in as ${client.user.tag}`);
+});
 
 client.login(process.env.DISCORD_TOKEN);
